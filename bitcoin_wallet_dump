@@ -479,6 +479,10 @@ class TruncatedError(ProtoParseError):
   """Input protocol message was truncated."""
 
 
+class UsageError(ProtoParseError):
+  """Error in the command-line."""
+
+
 def parse_varint(data, i, j):
   assert 0 <= i <= j
   u = 0
@@ -556,6 +560,23 @@ def get_required(msg, tag):
   assert len(v) == 1
   return v[0]
 
+def cescape_str(text, as_utf8=False):
+  # Copied from google/protobuf/text_format.py.
+  def escape(c):
+    o = ord(c)
+    if o == 10: return r"\n"   # optional escape
+    if o == 13: return r"\r"   # optional escape
+    if o ==  9: return r"\t"   # optional escape
+    if o == 39: return r"\'"   # optional escape
+
+    if o == 34: return r'\"'   # necessary escape
+    if o == 92: return r"\\"   # necessary escape
+
+    # necessary escapes
+    if not as_utf8 and (o >= 127 or o < 32): return "\\%03o" % o
+    return c
+  return "".join([escape(c) for c in text])
+
 
 def parse_bitcoin_wallet_proto(data):
   TAG_WALLET_NETWORK_IDENTIFIER = 1
@@ -577,6 +598,9 @@ def parse_bitcoin_wallet_proto(data):
     public_key = get_required(msg_key, TAG_KEY_PUBLIC_KEY)['data']
     pubkey_format = get_pubkey_format(public_key)
     assert pubkey_format in ('bin', 'bin_compressed')
+    # Ignore get_privkey_format(private_key), it's always 'bin', never
+    # 'bin_compressed' if the proto was created by the Android app named
+    # Bitcoin Wallet.
     is_compressed = pubkey_format == 'bin_compressed'
     assert get_privkey_format(private_key) == 'bin'
     private_key = decode_privkey(private_key)
@@ -713,25 +737,14 @@ def detect(data):
     return 'unknown'
 
 
-def main(argv):
-  if len(argv) != 2:
-    print >>sys.stderr, 'Usage: %s <input-filename>' % argv[0]
-    sys.exit(1)
-  filename = argv[1]
-  if filename == '-':
-    data = sys.stdin.read()
-  else:
-    data = open(filename).read()
-  format = detect(data)
-  print 'input_format: %s\n' % format
-  if format == 'unknown':
-    raise RuntimeError('Could not detect file format: %s' % filename)
-  count = 0
-  for bkey in PARSERS[format](data):
+def improve(bkeys):
+  """Yields ckeys from bkeys."""
+  for bkey in bkeys:
     private_key = bkey.get('private_key')
     address = bkey.get('address')
     public_key = bkey.get('public_key')
     is_compressed = bkey.get('is_compressed')
+    address_c = address_u = None
     if private_key is not None:
       private_key_format = get_privkey_format(private_key)
       assert private_key_format == 'decimal'
@@ -753,8 +766,33 @@ def main(argv):
       else:
         address = address_u
     assert address is not None
+    ckey = {}
+    if private_key is not None:
+      ckey['private_key'] = private_key
+    if public_key is not None:
+      ckey['public_key'] = public_key
+    if is_compressed is not None:
+      ckey['is_compressed'] = is_compressed
+    if address_c is not None:
+      ckey['address_c'] = address_c
+    if address_u is not None:
+      ckey['address_u'] = address_u
+    if address_c is None and address_u is None and address is not None:
+      ckey['address'] = address
+    yield ckey
+
+
+def dump_text(ckeys, format):
+  print 'input_format: %s\n' % format
+  count = 0
+  for ckey in ckeys:
+    private_key = ckey.get('private_key')
+    address_c = ckey.get('address_c')
+    address_u = ckey.get('address_u')
+    public_key = ckey.get('public_key')
+    is_compressed = ckey.get('is_compressed')
     if is_compressed is None:
-      print 'SHARE:', address
+      print 'SHARE:', ckey['address']
       if private_key is not None:
         print 'SECRET:', encode_privkey(private_key, 'wif')
     else:
@@ -767,9 +805,95 @@ def main(argv):
   print 'Found and dumped %d key%s.' % (count, 's' * (count != 1))
 
 
+def dump_bitcoin_wallet_proto_ascii(ckeys, format):
+  print 'network_identifier: "org.bitcoin.production"'  # TODO(pts): .test?
+  print '# http://bitcoinj.googlecode.com/git/core/src/bitcoin.proto'
+  print 'version: 0'
+  print 'encryption_type: UNENCRYPTED'
+  print 'key_rotation_time: 0'
+  # last_seen_block_height: 323508
+  # last_seen_block_time_secs: 1412259683
+  print '# input_format: %s\n' % format
+  count = 0
+  for ckey in ckeys:
+    private_key = ckey.get('private_key')
+    public_key = ckey.get('public_key')
+    is_compressed = ckey.get('is_compressed')
+    if private_key is None:
+      print '# SHARE:', ckey['address']
+    else:
+      iic = repr(bool(is_compressed)).lower()
+      print 'key {'
+      print '  type: ORIGINAL'
+      print '  # input_is_compressed: ' + iic
+      print '  # is_compressed: true'
+      print '  private_key: "%s"' % cescape_str(encode_privkey(
+          private_key, 'bin'))
+      print '  public_key: "%s"' % cescape_str(encode_pubkey(
+          public_key, 'bin_compressed'))
+      print '  #creation_timestamp: 1401805973000'
+      print '}'
+      print 'key {'
+      print '  type: ORIGINAL'
+      print '  # input_is_compressed: ' + iic
+      print '  # is_compressed: false'
+      print '  private_key: "%s"' % cescape_str(encode_privkey(
+          private_key, 'bin'))
+      print '  public_key: "%s"' % cescape_str(encode_pubkey(public_key, 'bin'))
+      print '  #creation_timestamp: 1401805973000'
+      print '}\n'
+    count += 1
+  print '# Found and dumped %d key%s.' % (count, 's' * (count != 1))
+
+
+DUMPERS = {
+    'text': dump_text,
+    'bitcoin_wallet_proto_ascii': dump_bitcoin_wallet_proto_ascii,
+}
+
+def main(argv):
+  if len(argv) < 2 or argv[1] == '--help':
+    raise UsageError(
+        'Usage: %s [<flag>...] [<input-filename> ...]\n' % argv[0] +
+        'Flags:\n'
+        '--output-format=text\n'
+        '--output-format=bitcoin_wallet_proto_ascii')
+  output_format = 'text'
+  i = 1
+  while i < len(argv):
+    arg = argv[i]
+    if arg == '-' or not arg.startswith('-'):
+      break
+    i += 1
+    if arg == '--':
+      break
+    arg = arg.lstrip('-')
+    if arg.startswith('output-format='):
+      value = arg.split('=', 1)[1]
+      if value in ('text', 'bitcoin_wallet_proto_ascii'):
+        output_format = value
+      else:
+        raise UsageError('Unknown flag value: --output-format=%s' % value)
+    else:
+      raise UsageError('Unknown flag: --%s' % arg)
+  for filename in argv[i:]:
+    if filename == '-':
+      data = sys.stdin.read()
+    else:
+      data = open(filename).read()
+    format = detect(data)
+    if format == 'unknown':
+      raise RuntimeError('Could not detect file format: %s' % filename)
+    dumper = DUMPERS[output_format]
+    dumper(improve(PARSERS[format](data)), format)
+
+
 if __name__ == '__main__':
   try:
     sys.exit(main(sys.argv))
   except RuntimeError, e:
     print >>sys.stderr, 'fatal: %s' % e
     sys.exit(2)
+  except UsageError, e:
+    print >>sys.stderr, 'fatal: %s' % e
+    sys.exit(1)
