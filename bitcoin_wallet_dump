@@ -6,10 +6,10 @@
 type python2.7 >/dev/null 2>&1 && exec python2.7 -- "$0" ${1+"$@"}
 type python2.6 >/dev/null 2>&1 && exec python2.6 -- "$0" ${1+"$@"}
 type python2.5 >/dev/null 2>&1 && exec python2.5 -- "$0" ${1+"$@"}
-#type python2.4 >/dev/null 2>&1 && exec python2.4 -- "$0" ${1+"$@"}
+type python2.4 >/dev/null 2>&1 && exec python2.4 -- "$0" ${1+"$@"}
 exec python -- ${1+"$@"}; exit 1
 
-Requirements: Python (2.5, 2.6 or 2.7; doesn't work with <=2.4 or 3.x) and,
+Requirements: Python (2.5, 2.6 or 2.7; doesn't work with <=2.3 or 3.x) and,
 optionally, for the openssl(1) command-line tool (for decrypting encrypted
 wallets).
 
@@ -37,15 +37,311 @@ addresses (SHARE) will also be generated and dumped.
 Please note that some tools accept only uncompressed addresses, and some
 tools (such as the Bitcoin Wallet app for Android) display compressed
 addresses.
-
-TODO(pts): Add Python 2.4 compatibility (no hashlib).
 """
 
-import hashlib
 import os
 import re
 import subprocess
 import sys
+
+# --- SHA-256 hash
+
+try:
+  # hashlib.new may raise ValueError('unsupported hash type').
+  assert __import__('hashlib').new('sha256', 'FooBarBaz').hexdigest() == '4da8b89a905445e96dd0ab6c9be9a72c8b0ffc686a57a3cc6808a8952a3560ed'
+  sha256 = lambda data='': __import__('hashlib').new('sha256', data)
+except (ImportError, ValueError, AssertionError), e:
+  sha256 = None
+
+if sha256 is None:  # E.g. in Python 2.4.
+  import struct
+  def sha_transform(data, digest):  # Doesn't modify data or digest.
+    # Based on http://bitbucket.org/pypy/pypy/raw/c9685aebe8e0996808603169047d43b555816332/lib_pypy/_sha256.py
+    # True but slow: len(digest) == 8 and len(data) == 64.
+    w = list(struct.unpack('>16L', data))
+    for i in xrange(16, 64):
+      x, y = w[i - 15], w[i - 2]
+      w.append(((((y >> 17) | (y << 15)) ^ ((y >> 19) | (y << 13)) ^ (y >> 10)) + w[i - 7] + (((x >> 7) | (x << 25)) ^ ((x >> 18) | (x << 14)) ^ (x >> 3)) + w[i - 16]) & 0xffffffff)
+    def rnd(a, b, c, d, e, f, g, h, i, j):
+      t0 = h + (((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7))) + (g ^ (e & (f ^ g))) + j + w[i]
+      t1 = (((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10))) + (((a | b) & c) | (a & b))
+      return (d + t0) & 0xffffffff, (t1 + t0) & 0xffffffff
+    ss = list(digest)
+    ss[3], ss[7] = rnd(ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], 0, 0x428a2f98)
+    ss[2], ss[6] = rnd(ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], 1, 0x71374491)
+    ss[1], ss[5] = rnd(ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], 2, 0xb5c0fbcf)
+    ss[0], ss[4] = rnd(ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], 3, 0xe9b5dba5)
+    ss[7], ss[3] = rnd(ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], 4, 0x3956c25b)
+    ss[6], ss[2] = rnd(ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], 5, 0x59f111f1)
+    ss[5], ss[1] = rnd(ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], 6, 0x923f82a4)
+    ss[4], ss[0] = rnd(ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], 7, 0xab1c5ed5)
+    ss[3], ss[7] = rnd(ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], 8, 0xd807aa98)
+    ss[2], ss[6] = rnd(ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], 9, 0x12835b01)
+    ss[1], ss[5] = rnd(ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], 10, 0x243185be)
+    ss[0], ss[4] = rnd(ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], 11, 0x550c7dc3)
+    ss[7], ss[3] = rnd(ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], 12, 0x72be5d74)
+    ss[6], ss[2] = rnd(ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], 13, 0x80deb1fe)
+    ss[5], ss[1] = rnd(ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], 14, 0x9bdc06a7)
+    ss[4], ss[0] = rnd(ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], 15, 0xc19bf174)
+    ss[3], ss[7] = rnd(ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], 16, 0xe49b69c1)
+    ss[2], ss[6] = rnd(ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], 17, 0xefbe4786)
+    ss[1], ss[5] = rnd(ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], 18, 0x0fc19dc6)
+    ss[0], ss[4] = rnd(ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], 19, 0x240ca1cc)
+    ss[7], ss[3] = rnd(ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], 20, 0x2de92c6f)
+    ss[6], ss[2] = rnd(ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], 21, 0x4a7484aa)
+    ss[5], ss[1] = rnd(ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], 22, 0x5cb0a9dc)
+    ss[4], ss[0] = rnd(ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], 23, 0x76f988da)
+    ss[3], ss[7] = rnd(ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], 24, 0x983e5152)
+    ss[2], ss[6] = rnd(ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], 25, 0xa831c66d)
+    ss[1], ss[5] = rnd(ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], 26, 0xb00327c8)
+    ss[0], ss[4] = rnd(ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], 27, 0xbf597fc7)
+    ss[7], ss[3] = rnd(ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], 28, 0xc6e00bf3)
+    ss[6], ss[2] = rnd(ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], 29, 0xd5a79147)
+    ss[5], ss[1] = rnd(ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], 30, 0x06ca6351)
+    ss[4], ss[0] = rnd(ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], 31, 0x14292967)
+    ss[3], ss[7] = rnd(ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], 32, 0x27b70a85)
+    ss[2], ss[6] = rnd(ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], 33, 0x2e1b2138)
+    ss[1], ss[5] = rnd(ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], 34, 0x4d2c6dfc)
+    ss[0], ss[4] = rnd(ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], 35, 0x53380d13)
+    ss[7], ss[3] = rnd(ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], 36, 0x650a7354)
+    ss[6], ss[2] = rnd(ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], 37, 0x766a0abb)
+    ss[5], ss[1] = rnd(ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], 38, 0x81c2c92e)
+    ss[4], ss[0] = rnd(ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], 39, 0x92722c85)
+    ss[3], ss[7] = rnd(ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], 40, 0xa2bfe8a1)
+    ss[2], ss[6] = rnd(ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], 41, 0xa81a664b)
+    ss[1], ss[5] = rnd(ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], 42, 0xc24b8b70)
+    ss[0], ss[4] = rnd(ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], 43, 0xc76c51a3)
+    ss[7], ss[3] = rnd(ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], 44, 0xd192e819)
+    ss[6], ss[2] = rnd(ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], 45, 0xd6990624)
+    ss[5], ss[1] = rnd(ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], 46, 0xf40e3585)
+    ss[4], ss[0] = rnd(ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], 47, 0x106aa070)
+    ss[3], ss[7] = rnd(ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], 48, 0x19a4c116)
+    ss[2], ss[6] = rnd(ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], 49, 0x1e376c08)
+    ss[1], ss[5] = rnd(ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], 50, 0x2748774c)
+    ss[0], ss[4] = rnd(ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], 51, 0x34b0bcb5)
+    ss[7], ss[3] = rnd(ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], 52, 0x391c0cb3)
+    ss[6], ss[2] = rnd(ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], 53, 0x4ed8aa4a)
+    ss[5], ss[1] = rnd(ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], 54, 0x5b9cca4f)
+    ss[4], ss[0] = rnd(ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], 55, 0x682e6ff3)
+    ss[3], ss[7] = rnd(ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], 56, 0x748f82ee)
+    ss[2], ss[6] = rnd(ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], 57, 0x78a5636f)
+    ss[1], ss[5] = rnd(ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], ss[5], 58, 0x84c87814)
+    ss[0], ss[4] = rnd(ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], ss[4], 59, 0x8cc70208)
+    ss[7], ss[3] = rnd(ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], ss[3], 60, 0x90befffa)
+    ss[6], ss[2] = rnd(ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], ss[2], 61, 0xa4506ceb)
+    ss[5], ss[1] = rnd(ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], ss[1], 62, 0xbef9a3f7)
+    ss[4], ss[0] = rnd(ss[1], ss[2], ss[3], ss[4], ss[5], ss[6], ss[7], ss[0], 63, 0xc67178f2)
+    return tuple((digest[i] + ss[i]) & 0xffffffff for i in xrange(8))
+  class sha256(object):
+    def __init__(self, data=''):
+      self._digest = (0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19)
+      self._byte_count = 0  # The lowest 61 bits are significant here.
+      self._buf = ''  # Maximum 63 bytes.
+      self.update(data)
+    def update(self, data):
+      if not isinstance(data, (str, buffer)):
+        raise TypeError
+      size = len(data)
+      self._byte_count += size
+      if len(self._buf) + size < 64:
+        self._buf += str(data)
+      else:
+        i = 64 - len(self._buf)
+        digest = self._digest
+        digest = sha_transform(self._buf + str(data[:i]), digest)
+        while i + 64 <= size:
+          digest = sha_transform(buffer(data, i, 64), digest)
+          i += 64
+        self._digest = digest
+        self._buf = data[i:]  # Always an str.
+      # True but slow: assert len(self._buf) < 64
+    def digest(self):
+      bit_count = self._byte_count << 3
+      count = len(self._buf)
+      assert count == self._byte_count & 63
+      final_data = self._buf + '\x80' + '\0' * (63 - count)
+      final_digest = self._digest
+      if count >= 64 - 8:
+        final_digest = sha_transform(final_data, final_digest)
+        final_data = '\0' * 64
+      final_data = final_data[:56] + struct.pack('>Q', bit_count & 0xffffffffffffffff)
+      final_digest = sha_transform(final_data, final_digest)
+      return ''.join(struct.pack('>L', i) for i in final_digest)
+    def hexdigest(self):
+      return self.digest().encode('hex')
+    def copy(self):
+      new = sha256.__new__(sha256)
+      new._digest = self._digest
+      new._byte_count = self._byte_count
+      new._buf = self._buf
+      return new
+
+
+def test_sha256():
+  assert sha256('Bar' * 335).hexdigest() == (
+      '193194dcabf5a8164f07b84ee205b4f0e8bad919d513a25f89a7769edf3bf64d')
+  assert sha256('F' * 59).hexdigest() == (
+      '55773a51204a61dfca869f41a47a1a63e22eccf2b9973b7706a70dfe77e9bbf7')
+  assert sha256('FooBarBaz').hexdigest() == (
+      '4da8b89a905445e96dd0ab6c9be9a72c8b0ffc686a57a3cc6808a8952a3560ed')
+  assert sha256(buffer('FooBarBaz')).digest() == (
+      'M\xa8\xb8\x9a\x90TE\xe9m\xd0\xabl\x9b\xe9\xa7,\x8b\x0f\xfchjW\xa3\xcch'
+      '\x08\xa8\x95*5`\xed')
+  print 'OK sha-256'
+
+
+# --- RIPEMD160 hash
+
+try:
+  # hashlib.new may raise ValueError('unsupported hash type').
+  assert __import__('hashlib').new('ripemd160', 'FooBarBaz').hexdigest() == '211fb67f1d47198e1b42afffcf8a7c53eaefa784'
+  ripemd160 = lambda data='': __import__('hashlib').new('ripemd160', data)
+except (ImportError, ValueError, AssertionError), e:
+  ripemd160 = None
+
+if ripemd160 is None:  # E.g. in Python 2.4 or newer Pythons without OpenSSL.
+  # Based on https://maemo.gitorious.org/maemo-pkg/python-crypto/source/8651b0eace17916fe7ba14923dbe4054f255ec2a:lib/Crypto/Hash/RIPEMD160.py
+  import struct
+  def u32(n): return n & 0xFFFFffff
+  rho = [7, 4, 13, 1, 10, 6, 15, 3, 12, 0, 9, 5, 2, 14, 11, 8]
+  pi = [(9*i + 5) & 15 for i in xrange(16)]
+  rl = [range(16)]          # id
+  rl += [[rho[j] for j in rl[-1]]]  # rho
+  rl += [[rho[j] for j in rl[-1]]]  # rho^2
+  rl += [[rho[j] for j in rl[-1]]]  # rho^3
+  rl += [[rho[j] for j in rl[-1]]]  # rho^4
+  rr = [list(pi)]           # pi
+  rr += [[rho[j] for j in rr[-1]]]  # rhopi
+  rr += [[rho[j] for j in rr[-1]]]  # rho^2 pi
+  rr += [[rho[j] for j in rr[-1]]]  # rho^3 pi
+  rr += [[rho[j] for j in rr[-1]]]  # rho^4 pi
+  f1 = lambda x, y, z: x ^ y ^ z
+  f2 = lambda x, y, z: (x & y) | (~x & z)
+  f3 = lambda x, y, z: (x | ~y) ^ z
+  f4 = lambda x, y, z: (x & z) | (y & ~z)
+  f5 = lambda x, y, z: x ^ (y | ~z)
+  fl = [f1, f2, f3, f4, f5]
+  fr = [f5, f4, f3, f2, f1]
+  _shift1 = [11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8]
+  _shift2 = [12, 13, 11, 15, 6, 9, 9, 7, 12, 15, 11, 13, 7, 8, 7, 7]
+  _shift3 = [13, 15, 14, 11, 7, 7, 6, 8, 13, 14, 13, 12, 5, 5, 6, 9]
+  _shift4 = [14, 11, 12, 14, 8, 6, 5, 5, 15, 12, 15, 14, 9, 9, 8, 6]
+  _shift5 = [15, 12, 13, 13, 9, 5, 8, 6, 14, 11, 12, 11, 8, 6, 5, 5]
+  sl = [[_shift1[rl[0][i]] for i in xrange(16)]]
+  sl.append([_shift2[rl[1][i]] for i in xrange(16)])
+  sl.append([_shift3[rl[2][i]] for i in xrange(16)])
+  sl.append([_shift4[rl[3][i]] for i in xrange(16)])
+  sl.append([_shift5[rl[4][i]] for i in xrange(16)])
+  sr = [[_shift1[rr[0][i]] for i in xrange(16)]]
+  sr.append([_shift2[rr[1][i]] for i in xrange(16)])
+  sr.append([_shift3[rr[2][i]] for i in xrange(16)])
+  sr.append([_shift4[rr[3][i]] for i in xrange(16)])
+  sr.append([_shift5[rr[4][i]] for i in xrange(16)])
+  _kg = lambda x, y: int(2**30 * (y ** (1.0 / x)))
+  KL = [
+    0,      # Round 1: 0
+    _kg(2, 2),  # Round 2: 2**30 * sqrt(2)
+    _kg(2, 3),  # Round 3: 2**30 * sqrt(3)
+    _kg(2, 5),  # Round 4: 2**30 * sqrt(5)
+    _kg(2, 7),  # Round 5: 2**30 * sqrt(7)
+  ]
+  KR = [
+    _kg(3, 2),  # Round 1: 2**30 * cubert(2)
+    _kg(3, 3),  # Round 2: 2**30 * cubert(3)
+    _kg(3, 5),  # Round 3: 2**30 * cubert(5)
+    _kg(3, 7),  # Round 4: 2**30 * cubert(7)
+    0,      # Round 5: 0
+  ]
+  def rol(s, n):
+    assert 0 <= s <= 31
+    assert 0 <= n <= 0xFFFFffffL
+    return u32((n << s) | (n >> (32-s)))
+  initial_h = tuple(struct.unpack('<5L', '0123456789ABCDEFFEDCBA9876543210F0E1D2C3'.decode('hex')))
+  def box(h, f, k, x, r, s):
+    assert len(s) == 16
+    assert len(x) == 16
+    assert len(r) == 16
+    (a, b, c, d, e) = h
+    for word in xrange(16):
+      T = u32(a + f(b, c, d) + x[r[word]] + k)
+      T = u32(rol(s[word], T) + e)
+      (b, c, d, e, a) = (T, b, rol(10, c), d, e)
+    return (a, b, c, d, e)
+  def _ripemd160_compress(h, x):  # x is a list of 16 x 32-bit words
+    hl = hr = h
+    for round in xrange(5):
+      hl = box(hl, fl[round], KL[round], x, rl[round], sl[round])
+      hr = box(hr, fr[round], KR[round], x, rr[round], sr[round])
+    h = (u32(h[1] + hl[2] + hr[3]),
+       u32(h[2] + hl[3] + hr[4]),
+       u32(h[3] + hl[4] + hr[0]),
+       u32(h[4] + hl[0] + hr[1]),
+       u32(h[0] + hl[1] + hr[2]))
+    return h
+  def ripemd160_compress(h, s):
+    assert len(s) % 64 == 0
+    p = 0
+    while p < len(s):
+      h = _ripemd160_compress(h, struct.unpack('<16L', s[p:p+64]))
+      p += 64
+    assert p == len(s)
+    return h
+  class ripemd160(object):
+    def __init__(self, data=''):
+      self._h = initial_h
+      self._byte_count = 0    # input size (in bytes)
+      self._buf = ''
+      self.update(data)
+    def update(self, data):
+      if not isinstance(data, (str, buffer)):
+        raise TypeError
+      size = len(data)
+      self._byte_count += size
+      if len(self._buf) + size < 64:
+        self._buf += str(data)
+      else:
+        i = 64 - len(self._buf)
+        self._h = ripemd160_compress(self._h, self._buf + str(data[:i]))
+        while i + 64 <= size:
+          self._h = ripemd160_compress(self._h, buffer(data, i, 64))
+          i += 64
+        self._buf = data[i:]  # Always an str.
+      # True but slow: assert len(self._buf) < 64
+    def digest(self):
+      bit_count = (self._byte_count << 3) & 0xffffffffffffffff
+      assert len(self._buf) < 64
+      data = self._buf + '\x80'
+      if len(data) <= 56:
+        data = struct.pack('<56sQ', data, bit_count)
+      else:
+        assert len(data) <= 120
+        data = struct.pack('<120sQ', data, bit_count)
+      h = ripemd160_compress(self._h, data)
+      return struct.pack('<5L', *h)
+    def hexdigest(self):
+      return self.digest().encode('hex')
+    def copy(self):
+      obj = self.__class__()
+      obj.h = self._h
+      obj._byte_count = self._byte_count
+      obj._buf = self._buf
+      return obj
+
+
+def test_ripemd160():
+  assert ripemd160('FooBarBaz').digest() == (
+      '!\x1f\xb6\x7f\x1dG\x19\x8e\x1bB\xaf\xff\xcf\x8a|S\xea\xef\xa7\x84')
+  assert ripemd160('FooBarBaz').hexdigest() == (
+      '211fb67f1d47198e1b42afffcf8a7c53eaefa784')
+  assert ripemd160(buffer('FooBarBaz')).hexdigest() == (
+      '211fb67f1d47198e1b42afffcf8a7c53eaefa784')
+  r = ripemd160('Food')
+  for i in xrange(0, 100, 2):
+    r.update('Bar' * i)
+    r.update(buffer('Baz' * (i + 1)))
+  assert r.hexdigest() == '67008e9518b6dd9f5ed7bd9aa4eb79660c15a232'
+  print 'OK ripemd160'
+
 
 # --- Bitcoin crypto code.
 #
@@ -262,7 +558,10 @@ def decode_pubkey(pub, formt=None):
     elif formt == 'bin_compressed':
         x = decode(pub[1:33], 256)
         beta = pow(x*x*x+A*x+B, (P+1)/4, P)
-        y = (P-beta) if ((beta + ord(pub[0])) % 2) else beta
+        if (beta + ord(pub[0])) & 1:
+          y = P - beta
+        else:
+          y = beta
         return (x, y)
     elif formt == 'hex': return (decode(pub[2:66], 16), decode(pub[66:130], 16))
     elif formt == 'hex_compressed':
@@ -367,29 +666,15 @@ def privkey_to_address(priv, magicbyte=0):
 # Hashes
 
 def bin_hash160(string):
-    intermed = hashlib.sha256(string).digest()
-    digest = ''
-    try:
-        digest = hashlib.new('ripemd160', intermed).digest()
-    except:
-        digest = ripemd.RIPEMD160(intermed).digest()
-    return digest
-
-
-def hash160(string):
-    return bin_hash160(string).encode('hex')
+    return ripemd160(sha256(string).digest()).digest()
 
 
 def bin_sha256(string):
-    return hashlib.sha256(string).digest()
-
-
-def sha256(string):
-    return bin_sha256(string).encode('hex')
+    return sha256(string).digest()
 
 
 def bin_dbl_sha256(string):
-    return hashlib.sha256(hashlib.sha256(string).digest()).digest()
+    return sha256(sha256(string).digest()).digest()
 
 
 def dbl_sha256(string):
